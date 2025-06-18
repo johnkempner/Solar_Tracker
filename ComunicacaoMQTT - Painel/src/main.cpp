@@ -11,135 +11,174 @@ const int mqtt_port = 1883;
 const char* mqtt_user = "solar";       
 const char* mqtt_password = "tracker";       
 
-String horaminutosegundo = "";
-float hora = 0.0;
-float minuto = 0.0;
-float segundo = 0.0;
+// Variáveis globais com proteção
+volatile float hora = 0.0;
+volatile float minuto = 0.0;
+volatile float segundo = 0.0;
+char horaminutosegundo[20] = {0};
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 unsigned long lastReconnectAttempt = 0;
-const unsigned long reconnectInterval = 5000; 
+const unsigned long reconnectInterval = 5000;
 
 // Callback para mensagens MQTT recebidas
 void callback(char* topic, byte* payload, unsigned int length) {
-  String message;
-  for (int i = 0; i < length; i++) {
-    message += (char)payload[i];
-  }
+  // Buffer seguro para a mensagem
+  char message[50] = {0};
+  unsigned int copyLength = length < sizeof(message)-1 ? length : sizeof(message)-1;
+  strncpy(message, (char*)payload, copyLength);
+  message[copyLength] = '\0';
 
   // Processa os tópicos recebidos
-  if (String(topic) == "topic/horaminutosegundo") {
-    horaminutosegundo = message;
-    Serial.println("HoraMinutoSegundo recebido: " + horaminutosegundo);
+  if (strcmp(topic, "topic/horaminutosegundo") == 0) {
+    strncpy(horaminutosegundo, message, sizeof(horaminutosegundo)-1);
+    Serial.printf("HoraMinutoSegundo recebido: %s\n", horaminutosegundo);
   }
-  else if (String(topic) == "topic/hora") {
-    hora = message.toFloat();
-    Serial.println("Hora recebida: " + String(hora));
+  else if (strcmp(topic, "topic/hora") == 0) {
+    hora = atof(message);
+    Serial.printf("Hora recebida: %.2f\n", hora);
   }
-  else if (String(topic) == "topic/minuto") {
-    minuto = message.toFloat();
-    Serial.println("Minuto recebido: " + String(minuto));
+  else if (strcmp(topic, "topic/minuto") == 0) {
+    minuto = atof(message);
+    Serial.printf("Minuto recebido: %.2f\n", minuto);
   }
-  else if (String(topic) == "topic/segundo") {
-    segundo = message.toFloat();
-    Serial.println("Segundo recebido: " + String(segundo));
+  else if (strcmp(topic, "topic/segundo") == 0) {
+    segundo = atof(message);
+    Serial.printf("Segundo recebido: %.2f\n", segundo);
   }
 }
 
-// Task para conectar WiFi 
-void connectWiFi() {
+// Conectar WiFi com timeout
+bool connectWiFi() {
   Serial.begin(115200);
   Serial.println("\nConectando a " + String(ssid));
   
+  WiFi.disconnect(true);
   WiFi.begin(ssid, password);
   
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long startAttemptTime = millis();
+  const unsigned long timeout = 30000;
+  
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < timeout) {
     vTaskDelay(500 / portTICK_PERIOD_MS);
     Serial.print(".");
   }
   
-  Serial.println("\nWiFi conectado. IP: " + WiFi.localIP().toString());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi conectado. IP: " + WiFi.localIP().toString());
+    return true;
+  } else {
+    Serial.println("\nFalha ao conectar WiFi");
+    return false;
+  }
 }
 
-// Task para reconexão MQTT
+// Reconexão MQTT com proteção
 bool reconnectMQTT() {
   if (!client.connected()) {
     Serial.println("Tentando conexão MQTT...");
     
     if (client.connect("ESP32Client", mqtt_user, mqtt_password)) {
       Serial.println("Conectado ao broker MQTT!");
-      client.subscribe("topic/horaminutosegundo");
-      client.subscribe("topic/hora");
-      client.subscribe("topic/minuto");
-      client.subscribe("topic/segundo");
+      
+      // Subscreve com QoS 1 para maior confiabilidade
+      client.subscribe("topic/horaminutosegundo", 1);
+      client.subscribe("topic/hora", 1);
+      client.subscribe("topic/minuto", 1);
+      client.subscribe("topic/segundo", 1);
       return true;
     } else {
-      Serial.println("Falha na conexão. Código: " + String(client.state()));
+      Serial.printf("Falha na conexão. Código: %d\n", client.state());
       return false;
     }
   }
   return true;
 }
 
-// Task para gerenciar conexão MQTT
+// Task MQTT com proteção
 void mqttTask(void *pvParameters) {
   while (1) {
-    if (!client.connected() && millis() - lastReconnectAttempt > reconnectInterval) {
-      lastReconnectAttempt = millis();
-      reconnectMQTT();
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!client.connected()) {
+        if (millis() - lastReconnectAttempt > reconnectInterval) {
+          lastReconnectAttempt = millis();
+          if (!reconnectMQTT()) {
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            continue;
+          }
+        }
+      } else {
+        client.loop();
+      }
+    } else {
+      Serial.println("WiFi desconectado, tentando reconectar...");
+      connectWiFi();
     }
-    client.loop();
-    vTaskDelay(10 / portTICK_PERIOD_MS);
+    
+    vTaskDelay(100 / portTICK_PERIOD_MS); 
   }
 }
 
-// Lê a tensão do painel
+// Task de leitura do painel com proteção
 void dadosPainelTask(void *pvParameters) {
-  
   analogReadResolution(12); 
   analogSetAttenuation(ADC_11db);
 
   while (1) {
-    int valorAnalogico = analogRead(PINO_DADOS_PAINEL); 
-    float tensao3V = (valorAnalogico * 3.58) / 4095.0; 
-    float tensao12V = tensao3V * 4.0;
+    if (WiFi.status() == WL_CONNECTED && client.connected()) {
+      int valorAnalogico = analogRead(PINO_DADOS_PAINEL); 
+      float tensao3V = (valorAnalogico * 3.39) / 4095.0; 
+      float tensao12V = tensao3V * 4.0;
 
-    if (client.connected()) {
-      String mensagem = String(tensao12V, 2);
-      client.publish("topic/painel", mensagem.c_str());
+      char mensagem[20];
+      snprintf(mensagem, sizeof(mensagem), "%.2f", tensao12V);
+      
+      if (!client.publish("topic/painel", mensagem)) {
+        Serial.println("Falha ao publicar mensagem MQTT");
+      }
     }
     
-    vTaskDelay(100 / portTICK_PERIOD_MS);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
 
 void setup() {
-  connectWiFi();
+  // Inicializa WiFi
+  if (!connectWiFi()) {
+    Serial.println("Falha crítica ao conectar WiFi. Reiniciando...");
+    ESP.restart();
+  }
+
+  // Configura cliente MQTT
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
+  client.setBufferSize(512); 
+  client.setSocketTimeout(10); 
 
-  // Cria tasks no FreeRTOS
+  // Cria tasks com stacks adequados
   xTaskCreate(
     mqttTask,
     "MQTTTask",
-    4096,
+    3072, // Stack reduzida
     NULL,
-    2,
+    2, // Prioridade média
     NULL
   );
 
   xTaskCreate(
     dadosPainelTask,
     "DadosPainelTask",
-    4096,
+    2048, // Stack reduzida
     NULL,
-    1,
+    1, // Prioridade mais baixa
     NULL
   );
+
+
 }
 
 void loop() {
-  
+
 }
