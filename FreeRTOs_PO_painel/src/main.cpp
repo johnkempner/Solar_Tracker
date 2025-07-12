@@ -7,7 +7,7 @@
 // Configurações de rede e MQTT
 const char* ssid = "API_001";               //Nome do Wifi
 const char* password = "SOLARtracker";      //Senha do wifi
-const char* mqtt_server = "10.0.0.154";     //Endereço IP do mosquitto
+const char* mqtt_server = "10.0.0.155";     //Endereço IP do mosquitto
 const int mqtt_port = 1883;                 //Porta do mosquitto
 const char* mqtt_user = "solar";            //Usuário mosquitto
 const char* mqtt_password = "tracker";      //Senha mosquitto
@@ -169,9 +169,9 @@ void dadosLDRTask(void *pvParameters) {
     if (WiFi.status() == WL_CONNECTED && client.connected()) {
       int valorAnalogico_ldr = analogRead(LDR); 
      float tensao3Vldr = (valorAnalogico_ldr * 4.99) / 4095.0; 
-     float tensao12Vldr = tensao3Vldr * 4.0;
+     float tensao12Vldr = tensao3Vldr * 6.0;
 
-      char mensagem[20];
+      char mensagem[40];
       snprintf(mensagem, sizeof(mensagem), "%.2f", tensao12Vldr);
       
       if (!client.publish("topic/ldr", mensagem)) {
@@ -239,45 +239,49 @@ void setup() {
   client.setBufferSize(512);
   client.setSocketTimeout(10); 
 
-  //Criação da Task MQTT
-  xTaskCreate(
-    mqttTask,
-    "MQTTTask",
-    2560, 
-    NULL,
-    2, 
-    NULL
-  );
+// Criação da Task MQTT
+xTaskCreatePinnedToCore(
+    mqttTask,       
+    "MQTTTask",    
+    2560,          
+    NULL,          
+    1,              // Prioridade 
+    NULL,           
+    1               // Core onde a task será executada (0 ou 1)
+);
 
-  // Task de leitura dos dados do Painel
-  xTaskCreate(
-    dadosPainelTask,
+// Task de leitura dos dados do Painel
+xTaskCreatePinnedToCore(
+   dadosPainelTask,
     "DadosLDRTask",
     2560,
     NULL,
     1, 
-    NULL
-  );
+    NULL,
+    0               
+);
 
-  //Criação da Task de leitura de dados do LDR
-  xTaskCreate(
+//Criação da Task de leitura de dados do LDR
+xTaskCreatePinnedToCore(
     dadosLDRTask,
     "DadosPainelTask",
     2560,
     NULL,
-    1,
-    NULL
-  );
+    2, 
+    NULL,
+    0               
+);  
 
-  //Criação da Task Perturba Observa Painel
-  xTaskCreate(
+//Criação da Task Perturba Observa Painel
+xTaskCreatePinnedToCore(
     servoTask,          
     "Servo Control Task", 
-    2560,               
-    NULL,               
-    1,                  
-    NULL                
-  ); 
+    2560,
+    NULL,
+    3, 
+    NULL,
+    0               
+);  
 
 }
 
